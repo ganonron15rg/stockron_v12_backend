@@ -1,8 +1,9 @@
 # ==============================================================
-# 📊 Stockron Analyzer v12.7
+# 📊 Stockron Analyzer v12.7 → v13.0 bridge
 # Backend: FastAPI + Yahoo Finance + Finnhub + Google Translate
 # Adds: RateLimit Protection, Error Handler, HEAD /health, Safe Fetch
-# ==============================================================
+# + MasterAgent integration (/analyze_v13) – 10 Yahoo agents + Alpha fallback
+# ============================================================== 
 
 from __future__ import annotations
 import os, random, httpx, re, time
@@ -16,6 +17,10 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from googletrans import Translator
 from functools import lru_cache
+
+# ---- NEW: Master Agent (10×Yahoo + Alpha fallback) ----
+# Make sure you have: src/providers/{yahoo_agent.py, alpha_agent.py, stockron_master_agent.py}
+from src.providers.stockron_master_agent import MASTER_AGENT
 
 # --------------------- App & Config ---------------------
 app = FastAPI(title="Stockron Analyzer v12.7", version="12.7")
@@ -102,14 +107,14 @@ def fetch_yahoo_with_technicals(ticker: str, period="6mo") -> Dict[str, Any]:
         "pe_ratio": safe_float(info.get("trailingPE")),
         "ps_ratio": safe_float(info.get("priceToSalesTrailing12Months")),
         "peg_ratio": safe_float(info.get("pegRatio")),
-        "rev_growth": safe_float(info.get("revenueGrowth") * 100),
-        "eps_growth": safe_float(info.get("earningsQuarterlyGrowth") * 100),
+        "rev_growth": safe_float((info.get("revenueGrowth") or 0) * 100),
+        "eps_growth": safe_float((info.get("earningsQuarterlyGrowth") or 0) * 100),
         "market_cap": int(info.get("marketCap") or 0),
         "debt_equity": safe_float(info.get("debtToEquity")),
         "current_ratio": safe_float(info.get("currentRatio")),
-        "profit_margin": safe_float(info.get("profitMargins") * 100),
-        "roe": safe_float(info.get("returnOnEquity") * 100),
-        "dividend_yield": safe_float(info.get("dividendYield") * 100),
+        "profit_margin": safe_float((info.get("profitMargins") or 0) * 100),
+        "roe": safe_float((info.get("returnOnEquity") or 0) * 100),
+        "dividend_yield": safe_float((info.get("dividendYield") or 0) * 100),
 
         # Technical snapshot
         "sma20": safe_float(sma20.iloc[-1]),
@@ -185,7 +190,7 @@ def stance_from_overall(overall: float) -> str:
     if overall >= 55: return "Hold"
     return "Wait"
 
-# --------------------- Main Analyze Endpoint ---------------------
+# --------------------- Main Analyze Endpoint (v12.7) ---------------------
 @app.post("/analyze")
 async def analyze(req: AnalyzeRequest):
     ticker = req.ticker.upper().strip()
@@ -255,6 +260,46 @@ async def analyze(req: AnalyzeRequest):
         "transparency": "Yahoo Finance + Finnhub + Technical Indicators",
         "timestamp": _iso()
     }
+
+# --------------------- Master Agent Endpoint (v13.0) ---------------------
+@app.post("/analyze_v13")
+async def analyze_v13(req: AnalyzeRequest):
+    """
+    v13.0 – ניתוח עם Master Agent (10 Yahoo סוכנים + Alpha fallback)
+    מחזיר Snapshot בסיסי ומהיר (לתצוגת POC / Beta). ניתן להרחיב ל-contract המלא בהמשך.
+    """
+    ticker = req.ticker.upper().strip()
+    try:
+        raw = MASTER_AGENT.fetch(ticker)
+        if not raw:
+            return {"error": "No data from agents", "ticker": ticker, "timestamp": _iso()}
+
+        quote = raw.get("raw_quote") or {}
+        chart = raw.get("raw_chart") or {}
+        source = raw.get("source", "unknown")
+
+        # Best-effort fields; ניתן להרחיב למבנה המלא של v12.7 עם normalizer משותף
+        return {
+            "ticker": quote.get("symbol") or ticker,
+            "company_name": quote.get("company_name") or quote.get("shortName") or quote.get("longName") or ticker,
+            "sector": quote.get("sector", "Unknown"),
+            "data_source": source,
+            "price": quote.get("currentPrice"),
+            "pe_ratio": quote.get("trailingPE"),
+            "ps_ratio": quote.get("priceToSalesTrailing12Months"),
+            "peg_ratio": quote.get("pegRatio"),
+            "rev_growth": quote.get("revenueGrowth"),
+            "eps_growth": quote.get("earningsQuarterlyGrowth"),
+            "debt_equity": quote.get("debtToEquity"),
+            "roe": quote.get("returnOnEquity"),
+            "profit_margin": quote.get("profitMargins"),
+            "market_cap": quote.get("marketCap"),
+            "chart_meta": chart.get("meta") if isinstance(chart, dict) else None,
+            "timestamp": _iso()
+        }
+
+    except Exception as e:
+        return {"error": str(e), "ticker": ticker, "timestamp": _iso()}
 
 # --------------------- Health Endpoints ---------------------
 @app.get("/health")
