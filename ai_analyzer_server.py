@@ -1,11 +1,12 @@
 # ==============================================================
-#  Stockron Analyzer v12.3 (Hybrid Real-Data + Finnhub)
-#  Backend for Base44 / Next.js Frontend
+#  Stockron Analyzer v12.4 (Fundamental + Technical Hybrid)
 #  Author: Ron Ganon
+#  Includes RSI, SMA, MACD + Yahoo + Finnhub
 # ==============================================================
 
 from __future__ import annotations
 import os, math, random, httpx, yfinance as yf
+import pandas as pd
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 from fastapi import FastAPI
@@ -16,7 +17,7 @@ from pydantic import BaseModel
 # 🔧 FastAPI Setup
 # ==============================================================
 
-app = FastAPI(title="Stockron Analyzer Backend v12.3")
+app = FastAPI(title="Stockron Analyzer Backend v12.4")
 
 app.add_middleware(
     CORSMiddleware,
@@ -45,6 +46,25 @@ def fetch_yahoo_data(ticker: str) -> Dict[str, Any]:
     try:
         stock = yf.Ticker(ticker)
         info = stock.info
+        hist = stock.history(period="6mo")
+
+        if hist.empty:
+            raise Exception("No historical data found")
+
+        # --- Technical indicators ---
+        close = hist["Close"]
+        sma20 = close.rolling(window=20).mean().iloc[-1]
+        sma50 = close.rolling(window=50).mean().iloc[-1]
+        delta = close.diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        rsi = 100 - (100 / (1 + rs.iloc[-1]))
+
+        exp12 = close.ewm(span=12, adjust=False).mean()
+        exp26 = close.ewm(span=26, adjust=False).mean()
+        macd = exp12.iloc[-1] - exp26.iloc[-1]
+        signal = close.ewm(span=9, adjust=False).mean().iloc[-1]
 
         return {
             "company_name": info.get("shortName", ticker),
@@ -62,7 +82,15 @@ def fetch_yahoo_data(ticker: str) -> Dict[str, Any]:
             "profit_margin": round(info.get("profitMargins", 0) * 100, 2),
             "roe": round(info.get("returnOnEquity", 0) * 100, 2),
             "dividend_yield": round(info.get("dividendYield", 0) * 100, 2),
+
+            # --- Technicals ---
+            "sma20": round(sma20, 2),
+            "sma50": round(sma50, 2),
+            "rsi": round(rsi, 2),
+            "macd": round(macd, 2),
+            "signal": round(signal, 2),
         }
+
     except Exception as e:
         return {"error": str(e)}
 
@@ -84,19 +112,19 @@ def fetch_news_sentiment(ticker: str) -> str:
         return "Neutral"
 
 # ==============================================================
-# 🧮 Analysis Logic
+# 🧮 Scoring Logic
 # ==============================================================
 
 def calculate_scores(data: Dict[str, Any]) -> Dict[str, Any]:
     pe = data.get("pe_ratio", 0)
-    ps = data.get("ps_ratio", 0)
     growth = data.get("eps_growth", 0)
     profit = data.get("profit_margin", 0)
     roe = data.get("roe", 0)
+    rsi = data.get("rsi", 50)
 
     quant_score = max(0, min(100, 100 - (pe / 2) + (growth / 2)))
     quality_score = max(0, min(100, (roe / 2) + (profit / 3)))
-    catalyst_score = max(0, min(100, random.uniform(40, 90)))
+    catalyst_score = max(0, min(100, 100 - abs(rsi - 50)))  # RSI closer to 50 = more balanced
 
     overall_score = round(
         quant_score * 0.4 + quality_score * 0.4 + catalyst_score * 0.2, 1
@@ -116,10 +144,9 @@ def calculate_scores(data: Dict[str, Any]) -> Dict[str, Any]:
 def generate_ai_summary(ticker: str, data: Dict[str, Any], scores: Dict[str, Any], sentiment: str) -> str:
     return (
         f"{data.get('company_name', ticker)} ({ticker}) | "
-        f"PE {data.get('pe_ratio')}, PS {data.get('ps_ratio')}, PEG {data.get('peg_ratio')} | "
-        f"Growth: Rev {data.get('rev_growth')}%, EPS {data.get('eps_growth')}% | "
-        f"Profit Margin {data.get('profit_margin')}%, ROE {data.get('roe')}% | "
-        f"Sentiment {sentiment} | Score {scores['overall_score']}/100."
+        f"PE {data.get('pe_ratio')}, EPS {data.get('eps_growth')}%, PM {data.get('profit_margin')}%, ROE {data.get('roe')}% | "
+        f"RSI {data.get('rsi')} | MACD {data.get('macd')} | Sentiment {sentiment} | "
+        f"Score {scores['overall_score']}/100."
     )
 
 # ==============================================================
@@ -130,17 +157,14 @@ def generate_ai_summary(ticker: str, data: Dict[str, Any], scores: Dict[str, Any
 async def analyze_stock(req: AnalyzeRequest):
     ticker = req.ticker.upper()
     data = fetch_yahoo_data(ticker)
-
     if "error" in data:
         return {"error": "Failed to fetch Yahoo Finance data", "details": data["error"]}
 
     sentiment = fetch_news_sentiment(ticker)
     scores = calculate_scores(data)
-
     ai_summary = generate_ai_summary(ticker, data, scores, sentiment)
 
     stance = "Buy" if scores["overall_score"] >= 70 else "Hold" if scores["overall_score"] >= 50 else "Wait"
-
     buy_zone = [round(data["last_price"] * 0.95, 2), round(data["last_price"] * 0.98, 2)]
     sell_zone = [round(data["last_price"] * 1.02, 2), round(data["last_price"] * 1.05, 2)]
 
@@ -156,6 +180,11 @@ async def analyze_stock(req: AnalyzeRequest):
             "eps_growth": data["eps_growth"],
             "overall_score": scores["quant_score"],
             "market_cap": data["market_cap"],
+            "rsi": data["rsi"],
+            "sma20": data["sma20"],
+            "sma50": data["sma50"],
+            "macd": data["macd"],
+            "signal": data["signal"]
         },
         "quality": {
             "debt_equity": data["debt_equity"],
@@ -177,12 +206,12 @@ async def analyze_stock(req: AnalyzeRequest):
         "buy_sell_zones": {
             "buy_zone": buy_zone,
             "sell_zone": sell_zone,
-            "rationale": "SMA20 ± ATR14 (realistic)"
+            "rationale": "SMA20 ± ATR14 (technical hybrid)"
         },
         "last_price": data["last_price"],
         "previous_close": data["previous_close"],
         "data_reliability": "High",
-        "transparency": "Yahoo Finance fundamentals + Finnhub sentiment",
+        "transparency": "Yahoo Finance + Finnhub + Technical Indicators",
         "timestamp": datetime.utcnow().isoformat() + "Z"
     }
 
@@ -194,7 +223,7 @@ async def analyze_stock(req: AnalyzeRequest):
 def health():
     return {
         "status": "ok",
-        "version": "v12.3",
+        "version": "v12.4",
         "service": "Stockron Analyzer Backend",
         "timestamp": datetime.utcnow().isoformat() + "Z"
     }
