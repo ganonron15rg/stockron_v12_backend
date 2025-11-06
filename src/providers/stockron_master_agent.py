@@ -1,17 +1,20 @@
-# providers/stockron_master_agent.py
-# Stockron Master Agent – manages 10 Yahoo agents + Alpha fallback
-import time, random
+# ==============================================================
+# 🤖 Stockron Master Agent v13.4 (Multi-Agent Final)
+# Manages 10 Yahoo Agents with cooldown + Alpha fallback
+# ==============================================================
+import time
 from src.providers.yahoo_agent import YahooAgent
 from src.providers.alpha_agent import AlphaAgent
+from src.providers.news_master_agent import NewsMasterAgent
 
 class MasterAgent:
     def __init__(self):
-        self.yahoo_agents = [YahooAgent(i) for i in range(1, 11)]  # 10 סוכני Yahoo
+        self.yahoo_agents = [YahooAgent(i) for i in range(1, 11)]  # 10 Yahoo agents
         self.alpha = AlphaAgent()
+        self.news = NewsMasterAgent()
         self.index = 0
 
     def _get_next_yahoo(self):
-        """Round-robin – מחזיר את הסוכן הזמין הבא"""
         attempts = 0
         while attempts < len(self.yahoo_agents):
             agent = self.yahoo_agents[self.index]
@@ -21,8 +24,7 @@ class MasterAgent:
             attempts += 1
         return None
 
-    def fetch(self, ticker: str):
-        # נסה כל אחד מהסוכנים לפי הסבב
+    def fetch_financials(self, ticker: str):
         for attempt in range(len(self.yahoo_agents)):
             agent = self._get_next_yahoo()
             if not agent:
@@ -34,12 +36,13 @@ class MasterAgent:
                     return data
             except Exception as e:
                 print(f"{agent.name} failed:", e)
-                agent.set_cooldown(300)  # סמן ל־5 דקות קירור
+                agent.set_cooldown(300)
                 continue
 
-        # fallback אם כולם חסומים
         print("Yahoo rate limit reached – switching to AlphaVantage")
         return self.alpha.fetch(ticker)
 
-# יצירת מופע גלובלי
+    def fetch_news(self, ticker: str):
+        return self.news.get_news(ticker)
+
 MASTER_AGENT = MasterAgent()
