@@ -1,5 +1,7 @@
-yfinance
-httpx
 fastapi
 uvicorn
 pydantic
+yfinance
+pandas
+httpx
+googletrans==4.0.0-rc1
