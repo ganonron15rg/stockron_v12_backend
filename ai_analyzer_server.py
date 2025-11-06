@@ -1,6 +1,6 @@
 # ==============================================================
-#  ai_analyzer_server.py — Stockron Analyzer v12 (Full Production)
-#  Render API for Base44 Frontend (Compatible with v12 Spec)
+#  ai_analyzer_server.py — Stockron Analyzer v12.1 (Full Production)
+#  Render API for Base44 Frontend (Compatible with v12+ Spec)
 # ==============================================================
 
 from __future__ import annotations
@@ -15,9 +15,9 @@ from pydantic import BaseModel
 # ⚙️ Setup FastAPI
 # ==============================================================
 
-app = FastAPI(title="Stockron Analyzer Backend v12")
+app = FastAPI(title="Stockron Analyzer Backend v12.1")
 
-# ✅ CORS Middleware (מונע חסימות חיבור)
+# ✅ CORS Middleware (מאפשר גישה מה-Frontend)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -34,7 +34,7 @@ app.add_middleware(
 def health():
     return {
         "status": "ok",
-        "version": "v12",
+        "version": "v12.1",
         "service": "Stockron Backend",
         "timestamp": datetime.utcnow().isoformat() + "Z"
     }
@@ -93,11 +93,13 @@ async def analyze_stock(request: AnalyzeRequest):
     quality = mock_quality()
     catalyst = mock_catalyst()
 
+    # קביעת ציונים כוללים
     avg_score = (
         quant["overall_score"] * 0.4
         + quality["quality_score"] * 0.4
         + catalyst["catalyst_score"] * 0.2
     )
+
     if avg_score >= 70:
         stance = "Buy"
     elif avg_score >= 55:
@@ -109,6 +111,11 @@ async def analyze_stock(request: AnalyzeRequest):
         f"{ticker} | P/E {quant['pe_ratio']}, EPS {quant['eps_growth']}%, "
         f"Profit Margin {quality['profit_margin']}%, Momentum {catalyst['sector_momentum']}%, "
         f"Sentiment {catalyst['news_sentiment']}."
+    )
+
+    # 👇 כאן נוסיף מחיר מניה (דמוי מחיר אמיתי)
+    last_price = round(
+        random.uniform(quant["pe_ratio"] * 8, quant["pe_ratio"] * 14), 2
     )
 
     return {
@@ -129,6 +136,7 @@ async def analyze_stock(request: AnalyzeRequest):
             "sell_zone": [round(quant['pe_ratio'] * 12, 1), round(quant['pe_ratio'] * 13.5, 1)],
             "rationale": "חישוב מבוסס ממוצע נע 50 וסטיית תקן (ATR)."
         },
+        "last_price": last_price,  # ✅ מחיר מניה נוסף
         "data_reliability": "High",
         "transparency": "Simulated data generated for demo environment",
         "timestamp": datetime.utcnow().isoformat() + "Z"
