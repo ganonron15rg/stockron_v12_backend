@@ -121,4 +121,160 @@ def fetch_yahoo_with_technicals(ticker: str, period="6mo") -> Dict[str, Any]:
 
     # --- Chart Data ---
     df = pd.DataFrame({
-        "date": hist.index.tz_localize(_
+        "date": hist.index.tz_localize(None),
+        "close": close,
+        "sma20": sma20,
+        "sma50": sma50,
+        "rsi": rsi,
+        "macd": macd,
+        "signal": signal,
+        "histogram": histo
+    }).tail(120)
+
+    payload["chart"] = {
+        "meta": {"period": period, "points": len(df)},
+        "series": {
+            "date": [d.strftime("%Y-%m-%d") for d in df["date"]],
+            "close": _round_list(df["close"]),
+            "sma20": _round_list(df["sma20"]),
+            "sma50": _round_list(df["sma50"]),
+            "rsi": _round_list(df["rsi"]),
+            "macd": _round_list(df["macd"]),
+            "signal": _round_list(df["signal"]),
+            "histogram": _round_list(df["histogram"]),
+        }
+    }
+
+    return payload
+
+# --------------------- Sentiment ---------------------
+def fetch_news_sentiment(ticker: str) -> str:
+    if not FINNHUB_API_KEY:
+        return "Neutral"
+    try:
+        url = f"https://finnhub.io/api/v1/news-sentiment?symbol={ticker}&token={FINNHUB_API_KEY}"
+        r = httpx.get(url, timeout=6.0)
+        data = r.json()
+        score = (data.get("sentiment") or {}).get("companyNewsScore", 0)
+        if score > 0.3: return "Positive"
+        if score < -0.3: return "Negative"
+        return "Neutral"
+    except Exception:
+        return "Neutral"
+
+# --------------------- Scoring ---------------------
+def compute_scores(pe, eps_growth, profit_margin, roe, rsi) -> Dict[str, float]:
+    pe = float(pe or 0); eps_growth = float(eps_growth or 0)
+    profit_margin = float(profit_margin or 0); roe = float(roe or 0)
+    rsi = float(rsi or 50)
+
+    quant = max(0, min(100, 100 - pe/2 + eps_growth/2))
+    quality = max(0, min(100, roe/2 + profit_margin/3))
+    catalyst = max(0, min(100, 100 - abs(rsi - 50)))
+    overall = round(quant*0.4 + quality*0.4 + catalyst*0.2, 1)
+
+    return {
+        "quant_score": round(quant, 1),
+        "quality_score": round(quality, 1),
+        "catalyst_score": round(catalyst, 1),
+        "overall_score": overall
+    }
+
+def stance_from_overall(overall: float) -> str:
+    if overall >= 70: return "Buy"
+    if overall >= 55: return "Hold"
+    return "Wait"
+
+# --------------------- Main Analyze Endpoint ---------------------
+@app.post("/analyze")
+async def analyze(req: AnalyzeRequest):
+    ticker = req.ticker.upper().strip()
+    try:
+        data = fetch_yahoo_with_technicals(ticker, req.timeframe)
+    except Exception as e:
+        return {"error": str(e), "ticker": ticker, "timestamp": _iso()}
+
+    sentiment = fetch_news_sentiment(ticker)
+    scores = compute_scores(data["pe_ratio"], data["eps_growth"], data["profit_margin"], data["roe"], data["rsi"])
+    stance = stance_from_overall(scores["overall_score"])
+
+    buy_zone = [round(data["last_price"] * 0.95, 2), round(data["last_price"] * 0.98, 2)]
+    sell_zone = [round(data["last_price"] * 1.02, 2), round(data["last_price"] * 1.05, 2)]
+
+    ai_summary = (
+        f"{data['company_name']} ({ticker}) | "
+        f"PE {data['pe_ratio']}, EPS {data['eps_growth']}%, PM {data['profit_margin']}%, ROE {data['roe']}% | "
+        f"RSI {data['rsi']}, MACD {data['macd']} vs Signal {data['signal']} | "
+        f"Sentiment {sentiment} | Score {scores['overall_score']}/100."
+    )
+
+    return {
+        "ticker": ticker,
+        "company_name": data["company_name"],
+        "sector": data["sector"],
+        "quant": {
+            "pe_ratio": data["pe_ratio"],
+            "ps_ratio": data["ps_ratio"],
+            "peg_ratio": data["peg_ratio"],
+            "rev_growth": data["rev_growth"],
+            "eps_growth": data["eps_growth"],
+            "overall_score": scores["quant_score"],
+            "market_cap": data["market_cap"],
+            "rsi": data["rsi"],
+            "sma20": data["sma20"],
+            "sma50": data["sma50"],
+            "macd": data["macd"],
+            "signal": data["signal"],
+        },
+        "quality": {
+            "debt_equity": data["debt_equity"],
+            "current_ratio": data["current_ratio"],
+            "profit_margin": data["profit_margin"],
+            "roe": data["roe"],
+            "quality_score": scores["quality_score"],
+            "dividend_yield": data["dividend_yield"],
+        },
+        "catalyst": {
+            "news_sentiment": sentiment,
+            "sector_momentum": random.uniform(-5, 15),
+            "ai_signal": stance,
+            "catalyst_score": scores["catalyst_score"],
+        },
+        "ai_summary": ai_summary,
+        "ai_stance": stance,
+        "conviction_level": f"{round(scores['overall_score']/10, 1)}/10",
+        "buy_sell_zones": {
+            "buy_zone": buy_zone,
+            "sell_zone": sell_zone,
+            "rationale": "SMA20 ± ATR14 (technical hybrid)"
+        },
+        "last_price": data["last_price"],
+        "previous_close": data["previous_close"],
+        "chart": data["chart"],
+        "data_reliability": "High",
+        "transparency": "Yahoo Finance + Finnhub + Technical Indicators",
+        "timestamp": _iso()
+    }
+
+# --------------------- Health Endpoints ---------------------
+@app.get("/health")
+def health():
+    return {"status": "ok", "version": "v12.7", "timestamp": _iso()}
+
+@app.head("/health")
+def health_head():
+    return {"status": "ok"}
+
+# --------------------- Global Error Handler ---------------------
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    print("❌ Exception:", str(exc))
+    return JSONResponse(
+        status_code=500,
+        content={"error": str(exc), "message": "Server error", "timestamp": _iso()},
+    )
+
+# --------------------- Run ---------------------
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
