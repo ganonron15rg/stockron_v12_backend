@@ -85,7 +85,7 @@ def stance_from_overall(overall: float) -> str:
 async def analyze(req: AnalyzeRequest):
     ticker = req.ticker.upper().strip()
     try:
-        base_data = await asyncio.to_thread(fetch_from_master, ticker)
+        base_data = await fetch_from_master(ticker)
     except Exception as e:
         return {"error": str(e), "ticker": ticker, "timestamp": _iso()}
 
