@@ -1,48 +1,33 @@
-# providers/alpha_agent.py
-# AlphaVantage fallback agent – free alternative to Yahoo
-import os, time, random, httpx
-
-ALPHA_KEY = os.getenv("ALPHAVANTAGE_KEY")
+# ==============================================================
+# 🔄 AlphaVantage Agent v13.5
+# Backup for Yahoo Finance if rate-limited
+# ==============================================================
+import os, httpx
 
 class AlphaAgent:
     def __init__(self):
-        self.name = "AlphaAgent"
-        self.client = httpx.Client(timeout=8.0)
+        self.api_key = os.getenv("ALPHA_API_KEY", "")
         self.base = "https://www.alphavantage.co/query"
 
     def fetch(self, ticker: str):
-        ticker = ticker.upper().strip()
-        if not ALPHA_KEY:
-            return None
+        if not self.api_key:
+            raise RuntimeError("AlphaVantage key not set")
 
-        time.sleep(random.uniform(0.2, 0.6))
+        url = f"{self.base}?function=OVERVIEW&symbol={ticker}&apikey={self.api_key}"
+        r = httpx.get(url, timeout=10.0)
+        data = r.json()
 
-        try:
-            # Fundamentals (overview)
-            url = f"{self.base}?function=OVERVIEW&symbol={ticker}&apikey={ALPHA_KEY}"
-            r = self.client.get(url)
-            data = r.json()
+        if "Symbol" not in data:
+            raise RuntimeError("AlphaVantage returned no data")
 
-            if not isinstance(data, dict) or not data.get("Symbol"):
-                return None
-
-            # Basic fields
-            return {
-                "provider": "alpha_vantage",
-                "symbol": data.get("Symbol"),
-                "company_name": data.get("Name"),
-                "sector": data.get("Sector"),
-                "pe_ratio": float(data.get("PERatio") or 0),
-                "peg_ratio": float(data.get("PEGRatio") or 0),
-                "ps_ratio": float(data.get("PriceToSalesRatioTTM") or 0),
-                "profit_margin": float(data.get("ProfitMargin") or 0),
-                "roe": float(data.get("ReturnOnEquityTTM") or 0),
-                "rev_growth": float(data.get("QuarterlyRevenueGrowthYOY") or 0) * 100,
-                "eps_growth": float(data.get("QuarterlyEarningsGrowthYOY") or 0) * 100,
-                "dividend_yield": float(data.get("DividendYield") or 0) * 100,
-                "market_cap": float(data.get("MarketCapitalization") or 0),
-            }
-
-        except Exception as e:
-            print("AlphaAgent error:", e)
-            return None
+        return {
+            "raw_quote": {
+                "symbol": data["Symbol"],
+                "price": float(data.get("50DayMovingAverage", 0)),
+                "pe": float(data.get("PERatio", 0)),
+                "market_cap": float(data.get("MarketCapitalization", 0)),
+                "eps_growth": float(data.get("QuarterlyEarningsGrowthYOY", 0)),
+                "rev_growth": float(data.get("QuarterlyRevenueGrowthYOY", 0))
+            },
+            "source": "AlphaVantage"
+        }
