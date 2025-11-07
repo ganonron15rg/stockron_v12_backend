@@ -1,99 +1,47 @@
-# =============================================================
-# 🗞️ Stockron News Master Agent v13.2
-# Fetches news from Yahoo, MarketWatch, Google RSS (Free Only)
 # ==============================================================
-import httpx, re, xml.etree.ElementTree as ET
-from datetime import datetime
-from googletrans import Translator
+# 🧠 Stockron Master Agent v13.5
+# Manages 10 Yahoo Agents + AlphaVantage + Finnhub fallback
+# ==============================================================
+import time, random
+from src.providers.yahoo_agent import YahooAgent
+from src.providers.alpha_agent import AlphaAgent
+from src.providers.finnhub_agent import FinnhubAgent
 
-translator = Translator()
-
-class YahooNewsAgent:
-    async def fetch(self, ticker: str):
-        url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={ticker}&region=US&lang=en-US"
-        r = httpx.get(url, timeout=6.0)
-        return self._parse(r.text, source="Yahoo Finance")
-
-    def _parse(self, rss_text, source):
-        root = ET.fromstring(rss_text)
-        items = []
-        for item in root.findall(".//item")[:8]:
-            items.append({
-                "headline": item.find("title").text,
-                "url": item.find("link").text,
-                "datetime": item.find("pubDate").text,
-                "source": source
-            })
-        return items
-
-class MarketWatchAgent:
-    async def fetch(self, ticker: str):
-        url = f"https://feeds.marketwatch.com/marketwatch/stock/{ticker}"
-        r = httpx.get(url, timeout=6.0)
-        return self._parse(r.text, source="MarketWatch")
-
-    def _parse(self, rss_text, source):
-        try:
-            root = ET.fromstring(rss_text)
-            items = []
-            for item in root.findall(".//item")[:8]:
-                items.append({
-                    "headline": item.find("title").text,
-                    "url": item.find("link").text,
-                    "datetime": item.find("pubDate").text,
-                    "source": source
-                })
-            return items
-        except Exception:
-            return []
-
-class GoogleNewsAgent:
-    async def fetch(self, ticker: str):
-        query = ticker.replace("^", "").replace(".", "")
-        url = f"https://news.google.com/rss/search?q={query}+stock"
-        r = httpx.get(url, timeout=6.0)
-        return self._parse(r.text, source="Google News")
-
-    def _parse(self, rss_text, source):
-        try:
-            root = ET.fromstring(rss_text)
-            items = []
-            for item in root.findall(".//item")[:8]:
-                items.append({
-                    "headline": item.find("title").text,
-                    "url": item.find("link").text,
-                    "datetime": item.find("pubDate").text,
-                    "source": source
-                })
-            return items
-        except Exception:
-            return []
-
-class NewsMasterAgent:
+class MasterAgent:
     def __init__(self):
-        self.agents = [YahooNewsAgent(), MarketWatchAgent(), GoogleNewsAgent()]
+        self.yahoo_agents = [YahooAgent(i) for i in range(1, 11)]
+        self.alpha = AlphaAgent()
+        self.finnhub = FinnhubAgent()
         self.index = 0
 
-    async def get_news(self, ticker: str):
-        for i in range(len(self.agents)):
-            agent = self.agents[(self.index + i) % len(self.agents)]
+    def _get_next_yahoo(self):
+        for _ in range(len(self.yahoo_agents)):
+            agent = self.yahoo_agents[self.index]
+            self.index = (self.index + 1) % len(self.yahoo_agents)
+            if agent.is_available():
+                return agent
+        return None
+
+    def fetch(self, ticker: str):
+        for _ in range(len(self.yahoo_agents)):
+            agent = self._get_next_yahoo()
+            if not agent:
+                break
             try:
-                raw_news = await agent.fetch(ticker)
-                self.index = (self.index + 1) % len(self.agents)
-                translated = []
-                for n in raw_news:
-                    try:
-                        hebrew = translator.translate(n["headline"], src='en', dest='he').text
-                        translated.append({**n, "headline_he": hebrew})
-                    except Exception:
-                        translated.append(n)
-                return {
-                    "ticker": ticker,
-                    "count": len(translated),
-                    "items": translated,
-                    "source": agent.__class__.__name__,
-                    "timestamp": datetime.utcnow().isoformat() + "Z"
-                }
+                data = agent.fetch(ticker)
+                if data and data.get("raw_quote"):
+                    data["source"] = agent.name
+                    return data
             except Exception as e:
-                print(f"⚠️ {agent.__class__.__name__} failed: {e}")
-        return {"ticker": ticker, "count": 0, "items": [], "source": "None"}
+                print(f"⚠️ {agent.name} failed:", e)
+                agent.set_cooldown(300)
+                continue
+
+        # fallback לשירותים נוספים
+        print("🚨 Yahoo blocked – trying AlphaVantage or Finnhub")
+        try:
+            return self.alpha.fetch(ticker)
+        except Exception:
+            return self.finnhub.fetch(ticker)
+
+MASTER_AGENT = MasterAgent()
